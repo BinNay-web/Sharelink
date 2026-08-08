@@ -32,10 +32,8 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         try {
             manager = reactContext.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
             channel = manager?.initialize(reactContext, reactContext.mainLooper, null)
-
             receiver = WifiDirectBroadcastReceiver(manager!!, channel!!, this)
             reactContext.registerReceiver(receiver, intentFilter)
-
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("INIT_FAILED", e.message)
@@ -73,11 +71,20 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         })
     }
 
+    // --- FIX ---
+    // Original bug: the parameter was named `deviceAddress`, same as the
+    // WifiP2pConfig property being set inside `.apply { }`. Inside that
+    // lambda, `deviceAddress` on BOTH sides resolved to the receiver's own
+    // property (config.deviceAddress), so the line was effectively
+    // `config.deviceAddress = config.deviceAddress` (a no-op self-assign),
+    // and the peer address passed in from JS was silently discarded.
+    // Renaming the parameter removes the shadowing ambiguity entirely.
     @ReactMethod
-    fun connectToPeer(deviceAddress: String, promise: Promise) {
+    fun connectToPeer(targetAddress: String, promise: Promise) {
         val config = WifiP2pConfig().apply {
-            deviceAddress = deviceAddress
+            deviceAddress = targetAddress
         }
+
         manager?.connect(channel, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() = promise.resolve(true)
             override fun onFailure(reasonCode: Int) =
@@ -107,6 +114,19 @@ class WifiDirectModule(private val reactContext: ReactApplicationContext) :
         reactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit(eventName, params)
+    }
+
+    // Clean up the registered receiver when the module is torn down, so a
+    // second initialize() call (or app teardown) doesn't leak a receiver
+    // registration or throw "receiver not registered" on double-cleanup.
+    override fun invalidate() {
+        super.invalidate()
+        try {
+            receiver?.let { reactContext.unregisterReceiver(it) }
+        } catch (e: IllegalArgumentException) {
+            // already unregistered — ignore
+        }
+        receiver = null
     }
 
     @ReactMethod
